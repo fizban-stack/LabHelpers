@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -u
+
+PVE_HOST="## Enter your DNS hostname here. If using IP Address, append port 8006."
+PVE_NODE="pve"
+
+PVE_USER="api@pam"
+PVE_TOKEN_ID="opendeck"
+
+# Put the actual secret in:
+# ~/.config/proxmox/opendeck-token 
+# configure tight permissions on this file: "chmod 600 $HOME/.config/proxmox/opendeck-token"
+TOKEN_FILE="$HOME/.config/proxmox/opendeck-token"
+
+VMIDS=(123 124 125 127 135 136)
+
+if [[ ! -r "$TOKEN_FILE" ]]; then
+    echo "Cannot read Proxmox token: $TOKEN_FILE"
+    exit 1
+fi
+
+PVE_TOKEN_SECRET="$(<"$TOKEN_FILE")"
+
+AUTH="Authorization: PVEAPIToken=${PVE_USER}!${PVE_TOKEN_ID}=${PVE_TOKEN_SECRET}"
+API="https://${PVE_HOST}/api2/json"
+
+all_running=true
+
+declare -A VM_STATUS
+
+#
+# Check current state of every VM
+#
+for VMID in "${VMIDS[@]}"; do
+    STATUS="$(
+        curl -fsSk \
+            -H "$AUTH" \
+            "${API}/nodes/${PVE_NODE}/qemu/${VMID}/status/current" \
+            | jq -r '.data.status'
+    )"
+
+    VM_STATUS["$VMID"]="$STATUS"
+
+    if [[ "$STATUS" != "running" ]]; then
+        all_running=false
+    fi
+done
+
+#
+# If everything is running, gracefully shut down the group.
+#
+if [[ "$all_running" == true ]]; then
+    echo "All lab VMs are running. Shutting down..."
+
+    for VMID in "${VMIDS[@]}"; do
+        echo "Shutting down VM ${VMID}..."
+
+        curl -fsSk -X POST \
+            -H "$AUTH" \
+            "${API}/nodes/${PVE_NODE}/qemu/${VMID}/status/shutdown" \
+            >/dev/null
+    done
+
+    echo "Shutdown commands sent."
+
+#
+# Otherwise start anything that isn't already running.
+#
+else
+    echo "Starting lab VMs..."
+
+    for VMID in "${VMIDS[@]}"; do
+
+        if [[ "${VM_STATUS[$VMID]}" == "running" ]]; then
+            echo "VM ${VMID} already running."
+            continue
+        fi
+
+        echo "Starting VM ${VMID}..."
+
+        curl -fsSk -X POST \
+            -H "$AUTH" \
+            "${API}/nodes/${PVE_NODE}/qemu/${VMID}/status/start" \
+            >/dev/null
+    done
+
+    echo "Start commands sent."
+fi
