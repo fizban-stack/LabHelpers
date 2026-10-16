@@ -1,0 +1,79 @@
+#!/usr/bin/python
+"""Dynamic SSH and web app pickers using Omarchy's native menu."""
+# Save this file as ~/.local/bin/omarchy-quick-menu
+
+import glob
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+
+def ssh_hosts():
+    hosts, visited = set(), set()
+
+    def read(path):
+        path = Path(path).expanduser()
+        if path in visited or not path.is_file():
+            return
+        visited.add(path)
+        for line in path.read_text().splitlines():
+            fields = shlex.split(line, comments=True)
+            if not fields:
+                continue
+            key = fields.pop(0).lower()
+            if "=" in key:
+                key, value = key.split("=", 1)
+                fields.insert(0, value)
+            if key == "host":
+                hosts.update(h for h in fields if not any(c in h for c in "*?![]") and not h.startswith("-"))
+            elif key == "include":
+                for pattern in fields:
+                    pattern = os.path.expanduser(pattern)
+                    if not os.path.isabs(pattern):
+                        pattern = str(Path.home() / ".ssh" / pattern)
+                    for included in glob.glob(pattern):
+                        read(included)
+
+    read(Path.home() / ".ssh/config")
+    return {host: host for host in sorted(hosts, key=str.casefold)}
+
+
+def webapps():
+    import gi
+    gi.require_version("GioUnix", "2.0")
+    from gi.repository import GioUnix
+    apps = {}
+    directory = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "applications"
+    for path in directory.glob("*.desktop"):
+        app = GioUnix.DesktopAppInfo.new_from_filename(str(path))
+        if not app or app.get_is_hidden() or app.get_nodisplay():
+            continue
+        command = app.get_commandline() or ""
+        if "omarchy-launch-webapp" in command or "omarchy-webapp-handler-" in command:
+            apps[app.get_display_name()] = app
+    return dict(sorted(apps.items(), key=lambda item: item[0].casefold()))
+
+
+def main():
+    mode = sys.argv[1]
+    entries = ssh_hosts() if mode == "ssh" else webapps()
+    if "--list" in sys.argv:
+        print("\n".join(entries))
+        return
+    if not entries:
+        subprocess.run(["notify-send", "Quick menu", "No SSH hosts found in ~/.ssh/config." if mode == "ssh" else "No installed Omarchy web apps found."])
+        return
+    result = subprocess.run(["omarchy", "menu", "select", "SSH hosts" if mode == "ssh" else "Web apps", *entries, "--", "--width", "420"], capture_output=True, text=True)
+    selected = result.stdout.rstrip("\n")
+    if result.returncode or selected not in entries:
+        return
+    if mode == "ssh":
+        subprocess.Popen(["omarchy-launch-terminal", "ssh", selected], start_new_session=True)
+    else:
+        entries[selected].launch([], None)
+
+
+if __name__ == "__main__":
+    main()
